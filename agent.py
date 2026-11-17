@@ -70,7 +70,10 @@ def care_entitlements(
     }
 
 
-TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
+TONE_ADDENDUM = ("\n\nKeep your final reply to the customer short: at most 120 words. "
+"State what happened, what Larkspur owes them, and their options in a few short lines. "
+"Do not repeat booking details the customer already knows, and do not add a closing summary."
+)                      # ✏️ Build 4, step 4.1, intelligence goal
 EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas for the tools you add
     {
         "name": "care_entitlements",
@@ -198,12 +201,22 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     """Run the tool loop until Claude stops asking for tools. Return its final text."""
     client, tracer = new_session()
     tools = tool_list()
+    # Neither the system prompt nor the tool list changes turn to turn within one
+    # conversation; marking the end of each as an ephemeral cache breakpoint lets
+    # turns 2+ reuse that ~4,100-token prefix instead of reprocessing it from
+    # scratch every time.
+    tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    system = [{
+        "type": "text",
+        "text": runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
+        "cache_control": {"type": "ephemeral"},
+    }]
     messages = [
         {"role": "user", "content": f"PNR {pnr}, last name {last_name}. {message}"},
     ]
 
     response = client.messages.create(
-        model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
+        model=MODEL, max_tokens=4096, system=system,
         thinking={"type": "adaptive"}, tools=tools, messages=messages,
     )
 
@@ -212,7 +225,7 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
         response = client.messages.create(
-            model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
+            model=MODEL, max_tokens=4096, system=system,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
