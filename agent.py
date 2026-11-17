@@ -283,7 +283,14 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "what get_flight_status told you; fare_family, loyalty_tier and whether this "
                 "is overnight are looked up from the booking, not asked of you. Every "
                 "response carries a policy_row_id. Cite it if you reference this decision "
-                "again."
+                "again. Relay the response's own explainer field to the customer close to "
+                "verbatim instead of inventing your own rationale for a denial. If escalate "
+                "is empty, do not hedge with an offer to have a human review the case — "
+                "empty means none is warranted. This resolves what is owed for the segment "
+                "you named, nothing else: if the customer is asking about a connecting or "
+                "onward flight you have not identified yet, this result describes the flight "
+                "you already have, not an answer to their question, and must not be presented "
+                "as what happens to the connection."
             ),
             "input_schema": {
                 "type": "object",
