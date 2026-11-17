@@ -9,6 +9,8 @@ Where you edit:   grep -n '✏' agent.py   (six marks, one per place)
 Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 """
 from __future__ import annotations
+import json
+from pathlib import Path
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
                      new_session, next_available_day, record_tool_result,
@@ -16,9 +18,149 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
+TRANSCRIPTS_PATH = Path(__file__).resolve().parent / "data" / "americas" / "transcripts_sample.jsonl"
+
+
+def reopen_stats(problem_type: str) -> Dict[str, Any]:                  # ✏️ Build 2, step 2.1
+    """Rate at which past cases of one intent_label were reopened by the
+    customer within 72 hours of being handled, from the 8-transcript sample."""
+    cases = [json.loads(line) for line in TRANSCRIPTS_PATH.read_text().splitlines() if line.strip()]
+    matches = [c for c in cases if c.get("intent_label") == problem_type]
+    if not matches:
+        return {"problem_type": problem_type, "cases_reviewed": 0,
+                 "error": "no past cases found with that intent_label"}
+    reopened = [c for c in matches if c.get("reopened_within_72h")]
+    return {
+        "problem_type": problem_type,
+        "cases_reviewed": len(matches),
+        "reopened_within_72h_count": len(reopened),
+        "reopened_within_72h_rate": round(len(reopened) / len(matches), 2),
+        "reopen_reasons": [c["reopen_reason"] for c in reopened if c.get("reopen_reason")],
+    }
+
+
+def care_entitlements(
+        disruption_type,
+        delay_minutes,
+        cause,
+        meal_threshold_minutes,
+        hotel_eligible,
+        transport_eligible,
+        reimbursement_eligible,
+        overnight_disruption=False):
+    """What care items this disruption qualifies for, from check_policy's eligibility flags."""
+    entitlements = []
+
+    if delay_minutes >= meal_threshold_minutes:
+        entitlements.append("meal_voucher")
+
+    if hotel_eligible and overnight_disruption:
+        entitlements.append("hotel_accommodation")
+
+    if transport_eligible:
+        entitlements.append("ground_transport")
+
+    if reimbursement_eligible:
+        entitlements.append("expense_reimbursement")
+
+    return {
+        "disruption_type": disruption_type,
+        "cause": cause,
+        "entitlements": entitlements,
+    }
+
+
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
-EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
+EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas for the tools you add
+    {
+        "name": "care_entitlements",
+        "description": (
+            "Determine customer care benefits after get_flight_status and check_policy "
+            "have already been used. Call this when a passenger asks what assistance, "
+            "services, vouchers, accommodation, reimbursement, or disruption support "
+            "they are entitled to because of a delay, cancellation, missed connection, "
+            "or irregular operation. Uses the operational disruption details and the "
+            "applicable policy outcome to translate rules into concrete care options. "
+            "Returns specific care items such as meal vouchers, hotel accommodation, "
+            "ground transportation, communication assistance, expense reimbursement "
+            "eligibility, and any other customer care benefits that may be offered."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "disruption_type": {
+                    "type": "string",
+                    "description": "Delay, cancellation, missed connection, diversion, or other disruption."
+                },
+                "delay_minutes": {
+                    "type": "integer",
+                    "description": "Current or expected arrival delay in minutes."
+                },
+                "cause": {
+                    "type": "string",
+                    "description": "Operational reason for the disruption from flight status."
+                },
+                "overnight_disruption": {
+                    "type": "boolean",
+                    "description": "Whether the passenger requires an overnight stay because of the disruption."
+                },
+                "meal_threshold_minutes": {
+                    "type": "integer",
+                    "description": "Delay threshold from check_policy at which meal assistance becomes available."
+                },
+                "hotel_eligible": {
+                    "type": "boolean",
+                    "description": "Whether check_policy determined hotel accommodation may be provided."
+                },
+                "transport_eligible": {
+                    "type": "boolean",
+                    "description": "Whether check_policy determined ground transportation may be provided."
+                },
+                "reimbursement_eligible": {
+                    "type": "boolean",
+                    "description": "Whether check_policy determined expenses may be reimbursable."
+                }
+            },
+            "required": [
+                "disruption_type",
+                "delay_minutes",
+                "cause",
+                "meal_threshold_minutes",
+                "hotel_eligible",
+                "transport_eligible",
+                "reimbursement_eligible"
+            ],
+        },
+    },
+    {
+        "name": "reopen_stats",
+        "description": (
+            "Check how often past cases of this same problem type were reopened by "
+            "the customer within 72 hours of being handled, based on a historical "
+            "sample of agent transcripts. This is a historical recurrence rate across "
+            "past cases, not a live count of tickets filed recently. Use it when a "
+            "customer asks whether an issue like theirs tends to come back, or to "
+            "decide whether proactive follow-up is warranted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "problem_type": {
+                    "type": "string",
+                    "description": (
+                        "The case's intent_label category, e.g. rebook_after_cancellation, "
+                        "compensation_hotel_request, status_anxiety."
+                    ),
+                },
+            },
+            "required": ["problem_type"],
+        },
+    },
+]
+LOCAL_TOOLS: Dict[str, Any] = {         # ✏️ Build 2, step 2.1: the functions behind them
+    "reopen_stats": reopen_stats,
+    "care_entitlements": care_entitlements,
+}
 
 
 def text_of(response) -> str:
@@ -81,7 +223,7 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    return build_tools() + mcp_client.tools() + EXTRA_TOOLS
 
 
 # ──────────────────────────────────────────────────────────────────────────────
